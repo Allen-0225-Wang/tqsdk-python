@@ -11,9 +11,10 @@ import sys
 import argparse
 import simplejson
 import asyncio
+import weakref
 from urllib.parse import urlparse
 from datetime import datetime
-from aiohttp import web
+from aiohttp import web, WSCloseCode
 import socket
 import tqsdk
 
@@ -278,6 +279,7 @@ class TqWebHelper(object):
     async def connection_handler(self, request):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
+        request.app["websockets"].add(ws)
         send_msg = self.get_send_msg(self._data)
         await ws.send_str(send_msg)
         conn_chan = tqsdk.api.TqChan(self._api, last_only=True)
@@ -292,32 +294,42 @@ class TqWebHelper(object):
         except Exception as e:
             await conn_chan.close()
             self._conn_diff_chans.remove(conn_chan)
+            request.app["websockets"].discard(ws)
 
     async def link_httpserver(self):
-        # init http server handlers
-        url_response = {
-            "ins_url": self._api._ins_url,
-            "md_url": self._api._md_url,
-        }
-        # TODO：在复盘模式下发送 replay_dt 给 web 端，服务器改完后可以去掉
-        if isinstance(self._api._backtest, tqsdk.api.TqReplay):
-            url_response["replay_dt"] = int(datetime.combine(self._api._backtest._replay_dt, datetime.min.time()).timestamp() * 1e9)
-        app = web.Application()
-        app.router.add_get(path='/url',
-                           handler=lambda request: TqWebHelper.httpserver_url_handler(url_response))
-        app.router.add_get(path='/', handler=lambda request: TqWebHelper.httpserver_index_handler(self._web_dir))
-        app.add_routes([web.get('/ws', self.connection_handler)])
-        app.router.add_static('/web', self._web_dir, show_index=True)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        server_socket = socket.socket()
-        server_socket.bind((self._http_server_host, self._http_server_port))
-        address = server_socket.getsockname()
-        site = web.SockSite(runner, server_socket)
-        await site.start()
-        ip = "127.0.0.1" if address[0] == "0.0.0.0" else address[0]
-        self._logger.info("您可以访问 http://{ip}:{port} 查看策略绘制出的 K 线图形。".format(ip=ip, port=address[1]))
-        await asyncio.sleep(100000000000)
+        try:
+            url_response = {
+                "ins_url": self._api._ins_url,
+                "md_url": self._api._md_url,
+            }
+            # TODO：在复盘模式下发送 replay_dt 给 web 端，服务器改完后可以去掉
+            if isinstance(self._api._backtest, tqsdk.api.TqReplay):
+                url_response["replay_dt"] = int(datetime.combine(self._api._backtest._replay_dt, datetime.min.time()).timestamp() * 1e9)
+            app = web.Application()
+            app["websockets"] = weakref.WeakSet()
+            app.on_shutdown.append(self._on_shutdown)
+            app.router.add_get(path='/url',
+                               handler=lambda request: TqWebHelper.httpserver_url_handler(url_response))
+            app.router.add_get(path='/', handler=lambda request: TqWebHelper.httpserver_index_handler(self._web_dir))
+            app.add_routes([web.get('/ws', self.connection_handler)])
+            app.router.add_static('/web', self._web_dir, show_index=True)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            server_socket = socket.socket()
+            server_socket.bind((self._http_server_host, self._http_server_port))
+            address = server_socket.getsockname()
+            site = web.SockSite(runner, server_socket)
+            await site.start()
+            ip = "127.0.0.1" if address[0] == "0.0.0.0" else address[0]
+            self._logger.info("您可以访问 http://{ip}:{port} 查看策略绘制出的 K 线图形。".format(ip=ip, port=address[1]))
+            await asyncio.sleep(100000000000)
+        finally:
+            self._logger.info("http://{ip}:{port} 已不可访问。".format(ip=ip, port=address[1]))
+            await site.stop()
+
+    async def _on_shutdown(self, app):
+        for ws in set(app["websockets"]):
+            await ws.close(code=WSCloseCode.GOING_AWAY)
 
     @staticmethod
     def parse_url(url):
