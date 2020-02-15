@@ -308,11 +308,11 @@ class TqWebHelper(object):
             app = web.Application()
             app["websockets"] = weakref.WeakSet()
             app.on_shutdown.append(self._on_shutdown)
-            app.router.add_get(path='/url',
-                               handler=lambda request: TqWebHelper.httpserver_url_handler(url_response))
-            app.router.add_get(path='/', handler=lambda request: TqWebHelper.httpserver_index_handler(self._web_dir))
-            app.add_routes([web.get('/ws', self.connection_handler)])
+            app.router.add_get(path='/url', handler=lambda request: TqWebHelper.httpserver_url_handler(url_response))
+            app.router.add_get(path='/', handler=self.httpserver_index_handler)
+            app.router.add_get(path='/index.html', handler=self.httpserver_index_handler)
             app.router.add_static('/web', self._web_dir, show_index=True)
+            app.add_routes([web.get('/ws', self.connection_handler)])
             runner = web.AppRunner(app)
             await runner.setup()
             server_socket = socket.socket()
@@ -331,6 +331,9 @@ class TqWebHelper(object):
         for ws in set(app["websockets"]):
             await ws.close(code=WSCloseCode.GOING_AWAY)
 
+    def httpserver_index_handler(self, request):
+        return web.FileResponse(self._web_dir + '/index.html')
+
     @staticmethod
     def parse_url(url):
         if isinstance(url, str):
@@ -343,10 +346,6 @@ class TqWebHelper(object):
     @staticmethod
     def httpserver_url_handler(response):
         return web.json_response(response)
-
-    @staticmethod
-    def httpserver_index_handler(web_dir):
-        return web.FileResponse(path=web_dir + '/index.html')
 
     @staticmethod
     def parser_arguments():
